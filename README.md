@@ -5,7 +5,7 @@ https://arxiv.org/pdf/2411.18888
 
 This repository contains a compact pipeline to preprocess the ArEEG Words data and train EEGNet style models to classify imagined Arabic words from 14 channel EEG at 128 Hz. It includes data preparation, windowing, denoising, train or val or test splits, model definitions, training with simple augmentations, and evaluation.
 
-What you get
+Includes: 
 - Preprocessing CLI to build train or val or test PKL files from raw CSVs
 - Three model heads on top of a compact EEGNet backbone
 - Class reweighting and label smoothing for stable training
@@ -153,12 +153,6 @@ Saved artifacts
 - Split indices at data/AREEG_Words/split/indices.pkl
 
 
-## Reproducing Results
-
-Since results depend on the specific subset of ArEEG Words you prepare, the script reports validation accuracy and test accuracy for your data directly in the console. For a quick smoke test after you have built PKLs
-- python EEGclassify.py --root data/AREEG_Words --epochs 10 --head attn
-
-
 ## Results
 
 Preprocessing
@@ -199,16 +193,9 @@ Training
 - preprocessing.py: CLI to prepare PKLs
 - eegcnn.py: EEGNet backbone and three classifier heads avg, gru, attn
 - EEGclassify.py: training loop, evaluation, and checkpointing
-- analysis.py and blink_stat.py: optional analysis scripts that use MNE for separate workflows not required by the core pipeline
-- montage.csv: example montage file for MNE based scripts
-- ArEEG.pdf: reference paper
-
-
-## Citation
-
-If you use the ArEEG dataset please cite the paper above. If you use this codebase please include a link to this repository.
-
-
+- mapping.ipynb: Generates a stable mapping from word to class id using the folder names found in raw_csv/. This preserves Arabic text. The results are stored in data\AREEG_Words\labels.json . 
+- ArEEG.pdf: Dataset Paper
+- 
 ## Acknowledgment
 
-All credit for the ArEEG dataset and data collection belongs to the authors of ArEEG_Words: Dataset for Envisioned Speech Recognition using EEG for Arabic Words. 
+All credit for the ArEEG dataset and data collection belongs to the authors of ArEEG_Words: Dataset for Envisioned Speech Recognition using EEG for Arabic Words.
