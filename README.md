@@ -114,8 +114,8 @@ Implementation references
 
 Optimisation
 - Optimizer: AdamW
-- Learning rate: 3e 4 by default
-- Weight decay: 1e 2 by default
+- Learning rate: 3e-4 by default
+- Weight decay: 1e-2 by default
 - Learning rate schedule: linear warmup for the first warmup epochs then cosine decay to zero
 
 Loss and regularisation
@@ -159,6 +159,40 @@ Since results depend on the specific subset of ArEEG Words you prepare, the scri
 - python EEGclassify.py --root data/AREEG_Words --epochs 10 --head attn
 
 
+## Results
+
+Preprocessing
+- Command
+  
+  ```
+  python preprocessing.py --dataset areeg_words --root data/AREEG_Words --overlap 0.75
+  ```
+
+- Output
+  
+  ```
+  Saved PKLs: {'N': 6520, 'train': 4564, 'val': 978, 'test': 978}
+  ```
+
+- Note: 0.75 overlap increases window count to 6520 and yields the split sizes above with the default 70 or 15 or 15 ratio.
+
+Training
+- Command
+  
+  ```
+  python EEGclassify.py --root data/AREEG_Words --epochs 2000 --batch 256 --lr 3e-4 --weight_decay 1e-2 --warmup 30 --F1 48 --D 2 --F2 192 --k1 31 --k2 15 --P1 2 --P2 2 --dropout 0.55 --head gru --rnn_hidden 128 --rnn_layers 1
+  ```
+
+- Final log
+  
+  ```
+  epoch 2000  lr 1.91e-10  train_loss 0.7872  val_loss 0.4484  val@1 0.8988  val@3 0.9581  best 0.9049
+  test_loss 0.4036  test@1 0.9151  test@3 0.9652
+  ```
+
+- Summary: GRU head with wider backbone reached about 89.9 percent top 1 and 95.8 percent top 3 on validation. Best seen during training was about 90.5 percent. Final test accuracy was about 91.5 percent top 1 and 96.5 percent top 3.
+
+
 ## Repository Map
 
 - data_imagine.py: CSV to windowed tensors to PKL for ArEEG Words
@@ -175,3 +209,6 @@ Since results depend on the specific subset of ArEEG Words you prepare, the scri
 If you use the ArEEG dataset please cite the paper above. If you use this codebase please include a link to this repository.
 
 
+## Acknowledgment
+
+All credit for the ArEEG dataset and data collection belongs to the authors of ArEEG_Words: Dataset for Envisioned Speech Recognition using EEG for Arabic Words. 
