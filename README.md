@@ -1,7 +1,7 @@
 <!-- Image & TITLE -->
 <div align="center">
   <a href="https://github.com/mabaan/Imagined-Speech-EEG-Classification">
-    <img src="https://github.com/user-attachments/assets/f6a738bf-42b4-4478-8fed-c39e2c8e895c" alt="Imagined Speech" width="400">
+    <img src="https://github.com/user-attachments/assets/f6a738bf-42b4-4478-8fed-c39e2c8e895c" alt="Imagined Speech" width="300">
   </a>
   <h2 align="center">ArEEG Words: Imagined Speech EEG Classification</h3>
 </div>
