@@ -1,0 +1,20 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data artifacts
+*.pkl
+*.npz
+*.npy
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

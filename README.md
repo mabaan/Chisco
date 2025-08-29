@@ -1,48 +1,177 @@
-# Chisco 
+# ArEEG Words: Imagined Speech EEG Classification
 
-**[Chisco: An EEG-based BCI dataset for decoding of imagined speech](https://www.nature.com/articles/s41597-024-04114-1)**
+Reference dataset: ArrEEG An EEG based BCI dataset for decoding of imagined speech
+https://arxiv.org/pdf/2411.18888
 
-## **Abstract**
-The rapid advancement of deep learning has enabled Brain-Computer Interfaces (BCIs) technology, particularly neural decoding techniques, to achieve higher accuracy and deeper levels of interpretation. Interest in decoding imagined speech has significantly increased because its concept akin to ``mind reading''. However, previous studies on decoding neural language have predominantly focused on brain activity patterns during human reading. The absence of imagined speech electroencephalography (EEG) datasets has constrained further research in this field. We present the *Chinese Imagined Speech Corpus* (Chisco), including over 20,000 sentences of high-density EEG recordings of imagined speech from healthy adults. Each subject's EEG data exceeds 900 minutes, representing the largest dataset per individual currently available for decoding neural language to date. Furthermore, the experimental stimuli include over 6,000 everyday phrases across 39 semantic categories, covering nearly all aspects of daily language. We believe that Chisco represents a valuable resource for the fields of BCIs, facilitating the development of more user-friendly BCIs.
+This repository contains a compact pipeline to preprocess the ArEEG Words data and train EEGNet style models to classify imagined Arabic words from 14 channel EEG at 128 Hz. It includes data preparation, windowing, denoising, train or val or test splits, model definitions, training with simple augmentations, and evaluation.
 
-## **Supplements**
-In addition to the three participants mentioned in the paper, we collected and validated data from two additional participants. The data were acquired using the same experimental paradigm and are accessible via the same Chisco link.
+What you get
+- Preprocessing CLI to build train or val or test PKL files from raw CSVs
+- Three model heads on top of a compact EEGNet backbone
+- Class reweighting and label smoothing for stable training
+- Warmup plus cosine learning rate schedule
+- Reproducible splits and a saved checkpoint file
 
-## **Reproducing the Paper Results**
 
-To reproduce the results from the paper, please follow the configurations provided below:
+## Quick Start
 
-### **Model Configuration：**
-```
-python -u EEGclassify.py --rand_guess 0 --lr1 5e-4 --epoch 100 --layer 1 --pooling mean --dataset imagine_decode --sub "01" --cls 39 --dropout1 0.5 --dropout2 0.5 --feel1 20 --feel2 10 --subset_ratio 1
-```
-### **SBATCH Parameters:**
-We ran our code on a SLURM cluster server. The following details may not be critical for reproducing the results presented in the paper, but they are provided here for reference if needed.
-```bash
-#!/bin/zsh
-#SBATCH -p compute 
-#SBATCH -N 1                                  # Request 1 node
-#SBATCH --ntasks-per-node=1                   # 1 process per node
-#SBATCH --cpus-per-task=4                     # Use 4 CPU cores per task
-#SBATCH --gres=gpu:a100-pcie-80gb:1           # Request 1 A100 GPU
-#SBATCH --mem=100G                            # Allocate 100GB memory
-source ~/.zshrc
-```
+1. Install dependencies
+   - Create a fresh environment and install
+     - pip install -r requirements.txt
 
-## **Citation**
+2. Prepare the dataset layout
+   - Expected root: data/AREEG_Words
+   - Place CSV files under
+     - data/AREEG_Words/raw_csv/<ArabicWord>/*.csv
+   - Provide two small text files in the dataset root
+     - data/AREEG_Words/labels.json mapping each word to a numeric class id
+     - data/AREEG_Words/channels_14.txt listing the 14 EEG channel names one per line
 
-```bibtex
-@article{Zhang2024,
-  author = {Zihan Zhang and Xiao Ding and Yu Bao and Yi Zhao and Xia Liang and Bing Qin and Ting Liu},
-  title = {Chisco: An EEG-based BCI dataset for decoding of imagined speech},
-  journal = {Scientific Data},
-  volume = {11},
-  number = {1},
-  pages = {1265},
-  year = {2024},
-  month = {November},
-  doi = {10.1038/s41597-024-04114-1},
-  url = {https://doi.org/10.1038/s41597-024-04114-1},
-  issn = {2052-4463}
-}
-```
+3. Build windowed PKLs
+   - python preprocessing.py --root data/AREEG_Words --overlap 0.0 --split 0.7,0.15,0.15
+   - Output files appear in
+     - data/AREEG_Words/preprocessed_pkl/train.pkl
+     - data/AREEG_Words/preprocessed_pkl/val.pkl
+     - data/AREEG_Words/preprocessed_pkl/test.pkl
+
+4. Train a model
+   - Example with attention head
+     - python EEGclassify.py --root data/AREEG_Words --head attn --epochs 200 --batch 256
+   - The script prints val accuracy and saves the best checkpoint to best_areeg_eegnet.pt by default
+
+5. Evaluate the best checkpoint
+   - By default training reloads the best checkpoint and reports test accuracy at the end
+
+
+## Data and Preprocessing
+
+Files and structure
+- Raw CSVs: one CSV per trial or segment under folders named by the Arabic word label
+- Labels: labels.json is a dict like {"WORD": class_index}
+- Channels list: channels_14.txt contains the canonical channel order used by the model
+
+Signal assumptions
+- Sampling rate: 128 Hz
+- Channels: 14 EEG channels
+- Segment duration: 2.0 seconds per window so 256 samples
+
+CSV parsing and channel alignment
+- The loader searches for a header row that contains channel names. It is tolerant to encodings utf 8 sig, utf 8, and cp1256
+- Column names like EEG.Fp1 are normalized by dropping the EEG. prefix
+- The code enforces an exact match to the names listed in channels_14.txt and will raise a helpful error if any channel is missing
+
+Denoising filters
+- 1 to 40 Hz fourth order Butterworth bandpass
+- 50 Hz notch filter for mains interference
+- Implemented in scipy.signal with zero phase filtfilt
+
+Windowing and overlap
+- Each recording is split into fixed windows of 2.0 seconds
+- Optional overlap can be set with --overlap in [0.0, 1.0). For example 0.5 gives a 50 percent overlap so a hop size of half a window
+
+Standardization at training time
+- Each window is z scored per channel using the window mean and standard deviation
+
+Splits and reproducibility
+- Random shuffling with a fixed seed controls the split
+- Ratios default to 70 or 15 or 15 for train or val or test
+- Split indices are saved to data/AREEG_Words/split/indices.pkl
+
+Implementation references
+- data_imagine.py: core loading, filtering, windowing, and PKL writing
+- preprocessing.py: small CLI wrapper around prepare_areeg_to_pkl
+
+See the following for details
+- data_imagine.py:1
+- preprocessing.py:1
+
+
+## Model Architecture
+
+Backbone: EEGNet style CNN
+- Temporal convolution on each channel then a depthwise spatial convolution across channels
+- Depthwise temporal convolution followed by pointwise convolution to mix features
+- Average pooling and dropout after each block
+- Output is a feature map with shape [batch, F2, T_out]
+
+Heads
+- Average pooling head: global average pooling over time then a linear classifier
+- GRU head: bidirectional GRU across the temporal axis then a linear classifier
+- Attention head: 1D attention over time with softmax weights then a linear classifier
+
+Default hyperparameters
+- Channels = 14, F1 = 16, D = 2, F2 = 64
+- Kernel sizes: k1 = 15, k2 = 7
+- Pool sizes: P1 = 2, P2 = 2
+- Dropout rate = 0.5
+
+Implementation references
+- eegcnn.py:1
+- EEGclassify.py:1
+
+
+## Training Procedure
+
+Optimisation
+- Optimizer: AdamW
+- Learning rate: 3e 4 by default
+- Weight decay: 1e 2 by default
+- Learning rate schedule: linear warmup for the first warmup epochs then cosine decay to zero
+
+Loss and regularisation
+- Cross entropy with class weights inversely proportional to class counts in the training set
+- Label smoothing of 0.05
+
+Data augmentation
+- Time shift: random circular shift in time of up to 8 samples which is about 62 ms at 128 Hz
+- Mixup: convex combination of pairs in a batch with Beta alpha equal to 0.2
+
+Metrics and logging
+- Top 1 and Top 3 accuracy on validation and test sets
+- Best validation model is saved to disk and reloaded for final test evaluation
+
+Reproducibility
+- NumPy and PyTorch seeds are set from the command line argument seed
+
+Practical notes
+- Adjust batch size based on GPU memory. 256 works on common 8 GB or 12 GB GPUs. Reduce if you see out of memory errors
+- If your data has more than 14 channels or a different order, update channels_14.txt and rebuild the PKLs
+
+
+## Expected Inputs and Outputs
+
+Inputs to training
+- Preprocessed PKLs with keys X, y, meta, channels, idx_to_label, sr, win_samples
+- Shapes: X is [N, 14, T], y is [N]
+
+Model I or O
+- Input tensor: float32 EEG windows of shape [B, 14, T]
+- Output tensor: logits of shape [B, n_classes]
+
+Saved artifacts
+- Model checkpoint file best_areeg_eegnet.pt
+- Split indices at data/AREEG_Words/split/indices.pkl
+
+
+## Reproducing Results
+
+Since results depend on the specific subset of ArEEG Words you prepare, the script reports validation accuracy and test accuracy for your data directly in the console. For a quick smoke test after you have built PKLs
+- python EEGclassify.py --root data/AREEG_Words --epochs 10 --head attn
+
+
+## Repository Map
+
+- data_imagine.py: CSV to windowed tensors to PKL for ArEEG Words
+- preprocessing.py: CLI to prepare PKLs
+- eegcnn.py: EEGNet backbone and three classifier heads avg, gru, attn
+- EEGclassify.py: training loop, evaluation, and checkpointing
+- analysis.py and blink_stat.py: optional analysis scripts that use MNE for separate workflows not required by the core pipeline
+- montage.csv: example montage file for MNE based scripts
+- ArEEG.pdf: reference paper
+
+
+## Citation
+
+If you use the ArEEG dataset please cite the paper above. If you use this codebase please include a link to this repository.
+
+

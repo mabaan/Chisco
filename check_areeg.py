@@ -1,0 +1,1 @@
+﻿import pickle as pkl; print(pkl.load(open('data/AREEG_Words/preprocessed_pkl/train.pkl','rb'))['X'].shape)

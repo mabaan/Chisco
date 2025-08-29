@@ -1,73 +1,169 @@
-# MIT License
-# 
-# Copyright (c) 2024 Zihan Zhang, Yi Zhao, Harbin Institute of Technology
-# 
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-# 
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-# 
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-
+# -*- coding: utf-8 -*-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import WhisperForConditionalGeneration
-import math
+
 
 class EEGcnn(nn.Module):
-    def __init__(self, Chans=64, dropoutRate=0.5, kernLength1=100, kernLength2=50, F1=8, D=2, F2=16, P1=2, P2=5, dropoutType='Dropout'):
+    """
+    Mini-EEGNet style backbone.
+    Input:  x [B, C=14, T]
+    Output: feat [B, F2, T_out]
+    """
+    def __init__(
+        self,
+        Chans: int = 14,
+        kernLength1: int = 15,
+        kernLength2: int = 7,
+        F1: int = 16,
+        D: int = 2,
+        F2: int = 64,
+        P1: int = 2,
+        P2: int = 2,
+        dropoutRate: float = 0.5,
+        dropoutType: str = "Dropout",
+    ):
         super().__init__()
         self.F1 = F1
         self.F2 = F2
+
+        Drop = nn.Dropout if dropoutType == "Dropout" else nn.Dropout2d
+
+        # Block 1: temporal conv then depthwise spatial conv across channels
         self.block1 = nn.Sequential(
-            nn.Conv2d(1, F1, (1, kernLength1), padding='same', bias=False), # (N, F1, Chans, Samples)
-            nn.BatchNorm2d(F1), # (N, F1, Chans, Samples)
-            nn.Conv2d(F1, D*F1, (Chans, 1), groups=F1, bias=False), # (N, D*F1, 1, Samples)
-            nn.BatchNorm2d(D*F1), # (N, D*F1, 1, Samples)
-            nn.ELU(), # (N, D*F1, 1, Samples)
-            nn.AvgPool2d((1, P1)), # (N, D*F1, 1, Samples//2)
-            nn.Dropout(dropoutRate) if dropoutType == "Dropout" else nn.Dropout2d(dropoutRate) # (N, D*F1, 1, Samples//2)
+            nn.Conv2d(1, F1, (1, kernLength1), padding="same", bias=False),
+            nn.BatchNorm2d(F1),
+            nn.Conv2d(F1, D * F1, (Chans, 1), groups=F1, bias=False),
+            nn.BatchNorm2d(D * F1),
+            nn.ELU(),
+            nn.AvgPool2d((1, P1)),
+            Drop(p=dropoutRate),
         )
+
+        # Block 2: depthwise temporal conv then pointwise conv
         self.block2 = nn.Sequential(
-            nn.Conv2d(D*F1, D*F1, (1, kernLength2), groups=D*F1, padding='same', bias=False), # (N, D*F1, 1, Samples//2)
-            nn.Conv2d(D*F1, F2, (1, 1), bias=False), # (N, F2, 1, Samples//2)
-            nn.BatchNorm2d(F2), # (N, F2, 1, Samples//2)
-            nn.ELU(), # (N, F2, 1, Samples//2)
-            nn.AvgPool2d((1, P2)), # (N, F2, 1, Samples//4)
-            nn.Dropout(dropoutRate) if dropoutType == "Dropout" else nn.Dropout2d(dropoutRate) # (N, F2, 1, Samples//4)
+            nn.Conv2d(D * F1, D * F1, (1, kernLength2), groups=D * F1, padding="same", bias=False),
+            nn.Conv2d(D * F1, F2, (1, 1), bias=False),
+            nn.BatchNorm2d(F2),
+            nn.ELU(),
+            nn.AvgPool2d((1, P2)),
+            Drop(p=dropoutRate),
         )
 
-    def forward(self, input): # (N, Chans, Samples)
-        input = torch.unsqueeze(input, dim=1) # (N, 1, Chans, Samples)
-        input = self.block1(input)
-        input = self.block2(input)
-        input = torch.squeeze(input, dim=2) # (N, F2, Samples//4)
-        return input
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, Chans, T]
+        x = x.unsqueeze(1)          # [B, 1, Chans, T]
+        x = self.block1(x)          # [B, D*F1, 1, T/P1]
+        x = self.block2(x)          # [B, F2, 1, T/(P1*P2)]
+        x = x.squeeze(2)            # [B, F2, T_out]
+        return x
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=1500):
+
+class EEGNetClassifier(nn.Module):
+    """
+    EEGNet backbone + global average pooling head.
+    """
+    def __init__(
+        self,
+        n_classes: int = 16,
+        Chans: int = 14,
+        kernLength1: int = 15,
+        kernLength2: int = 7,
+        F1: int = 16,
+        D: int = 2,
+        F2: int = 64,
+        P1: int = 2,
+        P2: int = 2,
+        dropoutRate: float = 0.5,
+    ):
         super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+        self.backbone = EEGcnn(
+            Chans=Chans, kernLength1=kernLength1, kernLength2=kernLength2,
+            F1=F1, D=D, F2=F2, P1=P1, P2=P2, dropoutRate=dropoutRate
+        )
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(F2, n_classes)
 
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0)/d_model))
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.backbone(x)                 # [B, F2, T_out]
+        feat = self.pool(feat).squeeze(-1)      # [B, F2]
+        return self.fc(feat)
 
-    def forward(self, x):
-        x = x + self.pe[:x.size(1)]
-        return self.dropout(x)
+
+class EEGNetGRUClassifier(nn.Module):
+    """
+    EEGNet backbone + bidirectional GRU over time.
+    Uses GRU to aggregate temporal features from EEGNet.
+    """
+    def __init__(
+        self,
+        n_classes: int = 16,
+        Chans: int = 14,
+        kernLength1: int = 15,
+        kernLength2: int = 7,
+        F1: int = 16,
+        D: int = 2,
+        F2: int = 64,
+        P1: int = 2,
+        P2: int = 2,
+        dropoutRate: float = 0.5,
+        rnn_hidden: int = 64,
+        rnn_layers: int = 1,
+    ):
+        super().__init__()
+        self.backbone = EEGcnn(
+            Chans=Chans, kernLength1=kernLength1, kernLength2=kernLength2,
+            F1=F1, D=D, F2=F2, P1=P1, P2=P2, dropoutRate=dropoutRate
+        )
+        self.gru = nn.GRU(
+            input_size=F2,
+            hidden_size=rnn_hidden,
+            num_layers=rnn_layers,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.dropout = nn.Dropout(dropoutRate)
+        self.fc = nn.Linear(2 * rnn_hidden, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.backbone(x)                 # [B, F2, T_out]
+        feat = feat.permute(0, 2, 1)            # [B, T_out, F2]
+        out, _ = self.gru(feat)                 # [B, T_out, 2*H]
+        out = out.mean(dim=1)                   # mean over time is more stable
+        out = self.dropout(out)
+        return self.fc(out)
+
+
+class EEGNetAttnClassifier(nn.Module):
+    """
+    EEGNet backbone + temporal attention pooling.
+    """
+    def __init__(
+        self,
+        n_classes: int = 16,
+        Chans: int = 14,
+        kernLength1: int = 15,
+        kernLength2: int = 7,
+        F1: int = 16,
+        D: int = 2,
+        F2: int = 64,
+        P1: int = 2,
+        P2: int = 2,
+        dropoutRate: float = 0.5,
+    ):
+        super().__init__()
+        self.backbone = EEGcnn(
+            Chans=Chans, kernLength1=kernLength1, kernLength2=kernLength2,
+            F1=F1, D=D, F2=F2, P1=P1, P2=P2, dropoutRate=dropoutRate
+        )
+        self.attn = nn.Conv1d(F2, 1, kernel_size=1)   # [B,1,T]
+        self.dropout = nn.Dropout(dropoutRate)
+        self.fc = nn.Linear(F2, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.backbone(x)                 # [B, F2, T]
+        w = self.attn(feat)                     # [B, 1, T]
+        w = torch.softmax(w, dim=-1)            # attention over time
+        pooled = (feat * w).sum(dim=-1)         # [B, F2]
+        pooled = self.dropout(pooled)
+        return self.fc(pooled)
