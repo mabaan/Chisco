@@ -1,9 +1,18 @@
-# ArEEG Words: Imagined Speech EEG Classification
+<!-- Image & TITLE -->
+<div align="center">
+  <a href="https://github.com/mabaan/Imagined-Speech-EEG-Classification">
+    <img src="https://github.com/user-attachments/assets/f6a738bf-42b4-4478-8fed-c39e2c8e895c" alt="Imagined Speech" width="400">
+  </a>
+  <h2 align="center">ArEEG Words: Imagined Speech EEG Classification</h3>
+</div>
 
-Reference dataset: ArrEEG An EEG based BCI dataset for decoding of imagined speech
+This repository presents a end-to-end Deep Learning model to classify words from EEG signals
+
+It contains a compact pipeline to preprocess the ArEEG Words data and train EEGNet style models to classify imagined Arabic words from 14 channel EEG at 128 Hz. It includes data preparation, windowing, denoising, train or val or test splits, model definitions, training with simple augmentations, and evaluation.
+
+Reference dataset: ArrEEG An EEG based BCI dataset for decoding of imagined speech, which was recorded on the 14-channel **Emotiv Epoc X** EEG kit. 
+
 https://arxiv.org/pdf/2411.18888
-
-This repository contains a compact pipeline to preprocess the ArEEG Words data and train EEGNet style models to classify imagined Arabic words from 14 channel EEG at 128 Hz. It includes data preparation, windowing, denoising, train or val or test splits, model definitions, training with simple augmentations, and evaluation.
 
 Includes: 
 - Preprocessing CLI to build train or val or test PKL files from raw CSVs
@@ -28,15 +37,20 @@ Includes:
      - data/AREEG_Words/channels_14.txt listing the 14 EEG channel names one per line
 
 3. Build windowed PKLs
-   - python preprocessing.py --root data/AREEG_Words --overlap 0.0 --split 0.7,0.15,0.15
+   - Run:
+     ```
+     python preprocessing.py --root data/AREEG_Words --overlap 0.0 --split 0.7,0.15,0.15
+     ```
    - Output files appear in
      - data/AREEG_Words/preprocessed_pkl/train.pkl
      - data/AREEG_Words/preprocessed_pkl/val.pkl
      - data/AREEG_Words/preprocessed_pkl/test.pkl
 
-4. Train a model
-   - Example with attention head
-     - python EEGclassify.py --root data/AREEG_Words --head attn --epochs 200 --batch 256
+4. Train the model with parameters specified
+   - Example with attention head:
+     ```
+     python EEGclassify.py --root data/AREEG_Words --head attn --epochs 200 --batch 256
+     ```
    - The script prints val accuracy and saves the best checkpoint to best_areeg_eegnet.pt by default
 
 5. Evaluate the best checkpoint
@@ -184,7 +198,7 @@ Training
   test_loss 0.4036  test@1 0.9151  test@3 0.9652
   ```
 
-- Summary: GRU head with wider backbone reached about 89.9 percent top 1 and 95.8 percent top 3 on validation. Best seen during training was about 90.5 percent. Final test accuracy was about 91.5 percent top 1 and 96.5 percent top 3.
+- Summary: GRU head with wider backbone reached about **89.9% top 1** and **95.8% top 3** on **validation**. Best seen during **training** was about **90.5%** . **Final test accuracy** was about **91.5% top 1** and **96.5% top 3**.
 
 
 ## Repository Map
