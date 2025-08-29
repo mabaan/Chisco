@@ -209,7 +209,7 @@ Training
 - EEGclassify.py: training loop, evaluation, and checkpointing
 - mapping.ipynb: Generates a stable mapping from word to class id using the folder names found in raw_csv/. This preserves Arabic text. The results are stored in data\AREEG_Words\labels.json . 
 - ArEEG.pdf: Dataset Paper
-- 
+  
 ## Acknowledgment
 
-All credit for the ArEEG dataset and data collection belongs to the authors of ArEEG_Words: Dataset for Envisioned Speech Recognition using EEG for Arabic Words.
+All credit for the ArEEG dataset and data collection belongs to the authors of ArEEG_Words: Dataset for Envisioned Speech Recognition using EEG for Arabic Words. See https://github.com/mabaan/Imagined-Speech-EEG-Classification/blob/main/ArEEG.pdf
