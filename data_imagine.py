@@ -189,10 +189,148 @@ def prepare_areeg_to_pkl(root: str = "data/AREEG_Words",
     return stats
 
 
+def prepare_areeg_leave_one_class_out(root: str = "data/AREEG_Words",
+                                    val_ratio: float = 0.15,
+                                    seed: int = 1337,
+                                    overlap: float = 0.0):
+    """
+    Leave-One-Class-Out per Subject splitting strategy.
+    
+    For each subject, one word/class is held out for testing.
+    Different subjects have different classes held out.
+    Model trains on ALL classes using data from multiple subjects.
+    
+    Strategy:
+    - Subject A: train on words 0-14, test on word 15
+    - Subject B: train on words 0-13,15, test on word 14  
+    - Subject C: train on words 0-12,14-15, test on word 13
+    - etc.
+    
+    This ensures:
+    1. No subject leakage (each subject appears in only train OR test)
+    2. All classes represented in training (from different subjects)
+    3. Realistic generalization test (new subject + potentially unseen class combination)
+    """
+    os.makedirs(os.path.join(root, "preprocessed_pkl"), exist_ok=True)
+    os.makedirs(os.path.join(root, "split"), exist_ok=True)
+
+    X, y, meta, channels, idx_to_label = load_areeg_words(root=root, overlap=overlap)
+    
+    # Extract unique subjects and classes
+    subjects = sorted(list(set([m[0] for m in meta])))  # m[0] is subject ID
+    classes = sorted(list(set(y)))
+    n_classes = len(classes)
+    
+    print(f"Found {len(subjects)} subjects and {n_classes} classes")
+    print(f"Subjects: {subjects}")
+    print(f"Classes: {list(idx_to_label.values())}")
+    
+    rng = np.random.default_rng(seed)
+    
+    # Assign each subject a different class to hold out
+    # Cycle through classes if more subjects than classes
+    rng.shuffle(subjects)
+    subject_holdout_class = {}
+    for i, subject in enumerate(subjects):
+        holdout_class = classes[i % n_classes]
+        subject_holdout_class[subject] = holdout_class
+        print(f"Subject {subject}: holdout class {holdout_class} ({idx_to_label[holdout_class]})")
+    
+    # Split data based on subject-class assignments
+    train_idx = []
+    test_idx = []
+    
+    for i, (x_sample, y_sample, meta_sample) in enumerate(zip(X, y, meta)):
+        subject = meta_sample[0]  # subject ID from metadata
+        sample_class = y_sample
+        holdout_class = subject_holdout_class[subject]
+        
+        if sample_class == holdout_class:
+            # This subject's holdout class -> test set
+            test_idx.append(i)
+        else:
+            # This subject's training classes -> train set
+            train_idx.append(i)
+    
+    # Create validation set from training set
+    rng.shuffle(train_idx)
+    n_val = int(len(train_idx) * val_ratio)
+    val_idx = train_idx[:n_val]
+    train_idx = train_idx[n_val:]
+    
+    def _dump(name, ids):
+        out = {
+            "X": X[ids],
+            "y": y[ids],
+            "meta": [meta[i] for i in ids],
+            "channels": channels,
+            "idx_to_label": idx_to_label,
+            "sr": AREEG_SR,
+            "win_samples": AREEG_SAMPLES,
+        }
+        p = os.path.join(root, "preprocessed_pkl", f"{name}.pkl")
+        with open(p, "wb") as f:
+            pkl.dump(out, f)
+        
+        # Print class distribution
+        y_split = [y[i] for i in ids]
+        class_counts = np.bincount(y_split, minlength=n_classes)
+        print(f"{name.upper()} set: {len(ids)} samples")
+        for cls_idx, count in enumerate(class_counts):
+            if count > 0:
+                print(f"  Class {cls_idx} ({idx_to_label[cls_idx]}): {count} samples")
+    
+    _dump("train", train_idx)
+    _dump("val", val_idx)
+    _dump("test", test_idx)
+    
+    # Save detailed split information
+    split_info = {
+        "strategy": "leave_one_class_out_per_subject",
+        "subject_holdout_class": subject_holdout_class,
+        "train_indices": train_idx,
+        "val_indices": val_idx,
+        "test_indices": test_idx,
+        "subjects": subjects,
+        "classes": classes,
+        "idx_to_label": idx_to_label,
+    }
+    with open(os.path.join(root, "split", "leave_one_class_out_split.pkl"), "wb") as f:
+        pkl.dump(split_info, f)
+    
+    # Verify all classes are represented in training
+    train_classes = set([y[i] for i in train_idx])
+    missing_classes = set(classes) - train_classes
+    if missing_classes:
+        print(f"WARNING: Classes missing from training set: {missing_classes}")
+    else:
+        print("✓ All classes represented in training set")
+    
+    stats = {
+        "strategy": "leave_one_class_out_per_subject",
+        "N_segments": len(y),
+        "N_subjects": len(subjects), 
+        "N_classes": n_classes,
+        "train": len(train_idx),
+        "val": len(val_idx),
+        "test": len(test_idx),
+        "train_classes": len(train_classes),
+    }
+    return stats
+
+
 if __name__ == "__main__":
     root = "data/AREEG_Words"
     if os.path.exists(root):
-        s = prepare_areeg_to_pkl(root=root)
-        print("Saved PKLs:", s)
+        # Choose splitting strategy:
+        
+        # Option 1: Original random split (with data leakage)
+        # s = prepare_areeg_to_pkl(root=root)
+        # print("Saved PKLs with random split:", s)
+        
+        # Option 2: Leave-One-Class-Out per Subject (recommended)
+        s = prepare_areeg_leave_one_class_out(root=root)
+        print("Saved PKLs with leave-one-class-out split:", s)
+        
     else:
         print("Run inside your Chisco repo where data/AREEG_Words exists.")
