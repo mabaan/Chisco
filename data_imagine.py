@@ -1,9 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-ArEEG_Words CSV -> windowed tensors -> PKL
-Place CSVs under: data/AREEG_Words/raw_csv/<ArabicWord>/*.csv
-Creates: data/AREEG_Words/preprocessed_pkl/{train,val,test}.pkl
-Each PKL has keys: X [N,14,T], y [N], meta, channels, idx_to_label, sr, win_samples
+🧠 EEG Data Preprocessor - The Data Chef
+
+This file is like a kitchen where we prepare raw EEG data for machine learning.
+Think of it as taking messy CSV files full of brain signals and turning them into 
+clean, organized data that our AI models can understand.
+
+What it does:
+- Takes raw EEG recordings (CSV files) from people imagining Arabic words
+- Cleans up the signals (removes noise, filters frequencies)
+- Cuts the long recordings into small 2-second windows
+- Adds extra features like brain wave power in different frequency bands
+- Splits everything into training, validation, and test sets
+- Saves it all as organized pickle files
+
+Input: Messy CSV files with brain signals
+Output: Clean, ready-to-use data files for training AI models
+
+Original format: CSV files scattered in folders
+Final format: [N, 19, T] tensors (N samples, 19 channels, T time points)
+- 14 original EEG channels + 5 band power features = 19 total channels
 """
 
 import os
@@ -61,12 +77,34 @@ def iir_notch(freq, fs, q=30.0):
 
 
 def filter_eeg(eeg_2d, fs=AREEG_SR):
-    # eeg_2d: [C, T]
+    """
+    Apply bandpass and notch filtering to EEG data.
+    eeg_2d: np.ndarray, shape [C, T]
+    fs: int, sampling rate
+    """
     b_bp, a_bp = butter_bandpass(1.0, 40.0, fs, order=4)
     b_n, a_n = iir_notch(50.0, fs, q=30.0)
     X = sps.filtfilt(b_bp, a_bp, eeg_2d, axis=1)
     X = sps.filtfilt(b_n, a_n, X, axis=1)
     return X.astype(np.float32)
+
+
+def compute_band_powers(eeg_2d, fs=AREEG_SR):
+    """
+    Compute band powers for each channel in the window.
+    Returns [C, 5] for delta, theta, alpha, beta, gamma.
+    eeg_2d: np.ndarray, shape [C, T]
+    fs: int, sampling rate
+    """
+    bands = [(1, 4), (4, 8), (8, 13), (13, 30), (30, 40)]
+    powers = np.zeros((eeg_2d.shape[0], len(bands)), dtype=np.float32)
+    for i, ch in enumerate(eeg_2d):
+        freqs, psd = sps.welch(ch, fs=fs, nperseg=min(256, ch.shape[-1]))
+        for j, (low, high) in enumerate(bands):
+            mask = (freqs >= low) & (freqs < high)
+            powers[i, j] = np.sum(psd[mask])
+    return powers  # [C, 5]
+
 
 
 def load_areeg_words(root: str = "data/AREEG_Words",
@@ -134,7 +172,12 @@ def load_areeg_words(root: str = "data/AREEG_Words",
             seg = eeg[:, start:start + AREEG_SAMPLES]
             if seg.shape[1] != AREEG_SAMPLES:
                 continue
-            X.append(seg)
+            # Compute band powers for this window
+            band_powers = compute_band_powers(seg, fs=AREEG_SR)  # [14, 5]
+            band_powers_mean = band_powers.mean(axis=0)  # [5]
+            band_powers_expanded = np.tile(band_powers_mean[:, np.newaxis], (1, seg.shape[1]))  # [5, T]
+            seg_with_features = np.concatenate([seg, band_powers_expanded], axis=0)  # [19, T]
+            X.append(seg_with_features)
             y.append(labels[word])
             meta.append((subj, word, fp, start))
 
@@ -173,6 +216,7 @@ def prepare_areeg_to_pkl(root: str = "data/AREEG_Words",
             "idx_to_label": idx_to_label,
             "sr": AREEG_SR,
             "win_samples": AREEG_SAMPLES,
+            "band_names": ["delta", "theta", "alpha", "beta", "gamma"],
         }
         p = os.path.join(root, "preprocessed_pkl", f"{name}.pkl")
         with open(p, "wb") as f:
@@ -322,15 +366,27 @@ def prepare_areeg_leave_one_class_out(root: str = "data/AREEG_Words",
 if __name__ == "__main__":
     root = "data/AREEG_Words"
     if os.path.exists(root):
-        # Choose splitting strategy:
-        
-        # Option 1: Original random split (with data leakage)
-        # s = prepare_areeg_to_pkl(root=root)
-        # print("Saved PKLs with random split:", s)
-        
-        # Option 2: Leave-One-Class-Out per Subject (recommended)
-        s = prepare_areeg_leave_one_class_out(root=root)
-        print("Saved PKLs with leave-one-class-out split:", s)
-        
+        # Use random split (Option 1)
+        s = prepare_areeg_to_pkl(root=root)
+        print("Saved PKLs with random split:", s)
+
+        # Visualize a few EEG windows and their labels
+        import matplotlib.pyplot as plt
+        with open(os.path.join(root, "preprocessed_pkl", "train.pkl"), "rb") as f:
+            obj = pkl.load(f)
+        X = obj["X"]  # [N, 14, T]
+        y = obj["y"]  # [N]
+        idx_to_label = obj["idx_to_label"]
+        print("Visualizing 5 random samples from train set:")
+        for i in np.random.choice(len(X), 5, replace=False):
+            plt.figure(figsize=(10, 4))
+            for ch in range(X.shape[1]):
+                plt.plot(X[i, ch], label=f"Ch{ch+1}")
+            plt.title(f"Sample {i} - Label: {y[i]} ({idx_to_label[y[i]]})")
+            plt.xlabel("Time (samples)")
+            plt.ylabel("EEG amplitude")
+            plt.legend(loc='upper right', fontsize='small', ncol=2)
+            plt.tight_layout()
+            plt.show()
     else:
         print("Run inside your Chisco repo where data/AREEG_Words exists.")

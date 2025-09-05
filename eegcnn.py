@@ -1,7 +1,145 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+🧠🤖 EEG Neural Network Models - The Brain Decoders
+
+This file contains the actual AI models that learn to decode brain signals.
+Think of these as different types of "brain reading machines" - each with 
+their own special way of understanding EEG data.
+
+The Models:
+1. EEGNet: The classic brain signal decoder - proven and reliable
+2. EEGNetTransformer: The modern approach using attention mechanisms 
+3. Ensemble Models: Multiple brain decoders working together for better accuracy
+
+What makes these special:
+- Designed specifically for EEG brain signals (not just any data)
+- Can handle both time and spatial patterns in brain activity
+- Uses advanced techniques like attention to focus on important parts
+- Ensemble approach: like having multiple experts vote on the answer
+
+Think of it like this:
+- Your brain produces electrical signals when you think
+- These models learn the unique "fingerprint" of each thought
+- The better the model, the more accurately it can guess what you're thinking
+
+The transformer version is like having a super-smart assistant that can 
+pay attention to the most important parts of your brain signals!
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+class EEGNetTransformerClassifier(nn.Module):
+    """
+    Enhanced EEGNet backbone + Transformer encoder with advanced features.
+    Supports deeper/wider transformer, larger ensembling, and better regularization.
+    """
+    def __init__(self, n_classes, Chans=14, kernLength1=15, kernLength2=7, F1=16, D=2, F2=128, P1=64, P2=16, dropoutRate=0.3,
+                 num_layers=6, dim_feedforward=512, ensemble=5):
+        super().__init__()
+        self.ensemble = ensemble
+        
+        # Diverse ensemble with different architectures
+        self.backbones = nn.ModuleList([
+            EEGcnn(Chans=Chans, kernLength1=kernLength1, kernLength2=kernLength2, 
+                   F1=F1 + i*4, D=D, F2=F2, P1=P1, P2=P2, dropoutRate=dropoutRate + i*0.05)
+            for i in range(ensemble)
+        ])
+        
+        self.transformers = nn.ModuleList([
+            nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d_model=F2, nhead=8, dim_feedforward=dim_feedforward, 
+                    dropout=dropoutRate, batch_first=True, activation='gelu'
+                ), num_layers=num_layers
+            ) for _ in range(ensemble)
+        ])
+        
+        # Multi-layer classifier with residual connections
+        self.classifiers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(F2, F2 // 2),
+                nn.LayerNorm(F2 // 2),
+                nn.GELU(),
+                nn.Dropout(dropoutRate),
+                nn.Linear(F2 // 2, n_classes)
+            ) for _ in range(ensemble)
+        ])
+        
+        # Learnable ensemble weights
+        self.ensemble_weights = nn.Parameter(torch.ones(ensemble) / ensemble)
+
+    def forward(self, x):
+        # x: [B, C, T]
+        outs = []
+        for i, (backbone, transformer, classifier) in enumerate(zip(
+            self.backbones, self.transformers, self.classifiers
+        )):
+            feat = backbone(x)  # [B, F2, T_out]
+            feat = feat.permute(0, 2, 1)  # [B, T_out, F2] for transformer
+            feat = transformer(feat)  # [B, T_out, F2]
+            
+            # Multi-head attention pooling
+            attn_weights = torch.softmax(feat.mean(dim=-1), dim=-1)  # [B, T_out]
+            feat = (feat * attn_weights.unsqueeze(-1)).sum(dim=1)  # [B, F2]
+            
+            out = classifier(feat)  # [B, n_classes]
+            outs.append(out)
+        
+        # Weighted ensemble
+        outs = torch.stack(outs)  # [ensemble, B, n_classes]
+        weights = torch.softmax(self.ensemble_weights, dim=0)
+        return torch.sum(outs * weights.view(-1, 1, 1), dim=0)
+
+
+class EEGNetGRUAttnClassifier(nn.Module):
+    """
+    EEGNet backbone + bidirectional GRU + temporal attention pooling.
+    Combines GRU for temporal modeling and attention for focusing on informative time steps.
+    """
+    def __init__(
+        self,
+        n_classes: int = 16,
+        Chans: int = 14,
+        kernLength1: int = 15,
+        kernLength2: int = 7,
+        F1: int = 16,
+        D: int = 2,
+        F2: int = 64,
+        P1: int = 2,
+        P2: int = 2,
+        dropoutRate: float = 0.5,
+        rnn_hidden: int = 64,
+        rnn_layers: int = 1,
+    ):
+        super().__init__()
+        self.backbone = EEGcnn(
+            Chans=Chans, kernLength1=kernLength1, kernLength2=kernLength2,
+            F1=F1, D=D, F2=F2, P1=P1, P2=P2, dropoutRate=dropoutRate
+        )
+        self.gru = nn.GRU(
+            input_size=F2,
+            hidden_size=rnn_hidden,
+            num_layers=rnn_layers,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.attn = nn.Conv1d(2 * rnn_hidden, 1, kernel_size=1)
+        self.dropout = nn.Dropout(dropoutRate)
+        self.fc = nn.Linear(2 * rnn_hidden, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.backbone(x)                 # [B, F2, T_out]
+        feat = feat.permute(0, 2, 1)            # [B, T_out, F2]
+        out, _ = self.gru(feat)                 # [B, T_out, 2*H]
+        out = out.permute(0, 2, 1)              # [B, 2*H, T_out]
+        w = self.attn(out)                      # [B, 1, T_out]
+        w = torch.softmax(w, dim=-1)            # attention over time
+        pooled = (out * w).sum(dim=-1)          # [B, 2*H]
+        pooled = self.dropout(pooled)
+        return self.fc(pooled)
+
 
 
 class EEGcnn(nn.Module):

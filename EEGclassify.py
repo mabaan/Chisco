@@ -1,4 +1,30 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+🚀 EEG Model Trainer - The AI Gym
+
+This is where the magic happens! This file trains artificial intelligence models 
+to read minds... well, sort of. It teaches AI to recognize what Arabic words 
+people are thinking about just from their brain signals.
+
+What it does:
+- Loads the clean EEG data prepared by data_imagine.py
+- Trains deep learning models (like EEGNet with transformers) to classify brain signals
+- Uses fancy techniques like ensemble learning (multiple models working together)
+- Tracks how well the model is learning and saves the best version
+- Tests the final model to see how accurate it is
+
+The AI Models Available:
+- Basic EEGNet: Simple but effective convolutional neural network
+- Transformer: Advanced attention-based model (like GPT but for brain signals)
+- Ensemble: Multiple models voting together for better accuracy
+
+Think of this as a gym where AI models train to become mind readers!
+The better they train, the more accurately they can guess what word you're thinking.
+
+Usage example:
+python EEGclassify.py --head transformer --epochs 1000 --ensemble 5
+"""
 import os, math
 import argparse
 import pickle as pkl
@@ -69,6 +95,7 @@ def make_loaders(root: str, batch: int):
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
     model.eval()
     ce = nn.CrossEntropyLoss()
+    kl = nn.KLDivLoss(reduction='batchmean')
     correct1 = correct3 = total = 0
     loss_sum = 0.0
     for xb, yb in loader:
@@ -94,6 +121,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
 
 
 def main():
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=str, default="data/AREEG_Words")
     ap.add_argument("--cls", type=int, default=16)
@@ -103,7 +131,7 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-2)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--save", type=str, default="best_areeg_eegnet.pt")
-    ap.add_argument("--head", type=str, default="attn", choices=["avg", "gru", "attn"])
+    ap.add_argument("--head", type=str, default="attn", choices=["avg", "gru", "attn", "gruattn", "transformer"])
 
     # EEGNet backbone widths and shapes
     ap.add_argument("--F1", type=int, default=16)
@@ -120,14 +148,23 @@ def main():
     ap.add_argument("--rnn_hidden", type=int, default=64)
     ap.add_argument("--rnn_layers", type=int, default=1)
 
+    # Augmentation toggles
+    ap.add_argument("--no_mixup", action="store_true", help="Disable mixup augmentation")
+    ap.add_argument("--no_timeshift", action="store_true", help="Disable time shift augmentation")
+
+    # Transformer specific arguments
+    ap.add_argument('--num_layers', type=int, default=2)
+    ap.add_argument('--dim_feedforward', type=int, default=128)
+    ap.add_argument('--ensemble', type=int, default=1)
+
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     tr_dl, va_dl, te_dl, info = make_loaders(args.root, args.batch)
-    if info["in_ch"] != 14:
-        raise SystemExit(f"Error: Expected 14 channels, got {info['in_ch']}. Rebuild PKLs.")
+    if info["in_ch"] != 19:
+        raise SystemExit(f"Error: Expected 19 channels, got {info['in_ch']}. Rebuild PKLs.")
     n_classes = args.cls if args.cls is not None else info["n_classes"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -149,6 +186,24 @@ def main():
             F1=args.F1, D=args.D, F2=args.F2,
             P1=args.P1, P2=args.P2, dropoutRate=args.dropout
         ).to(device)
+    elif args.head == "gruattn":
+        from eegcnn import EEGNetGRUAttnClassifier
+        model = EEGNetGRUAttnClassifier(
+            n_classes=n_classes, Chans=14,
+            kernLength1=args.k1, kernLength2=args.k2,
+            F1=args.F1, D=args.D, F2=args.F2,
+            P1=args.P1, P2=args.P2, dropoutRate=args.dropout,
+            rnn_hidden=args.rnn_hidden, rnn_layers=args.rnn_layers
+        ).to(device)
+    elif args.head == "transformer":
+        from eegcnn import EEGNetTransformerClassifier
+        model = EEGNetTransformerClassifier(
+            n_classes=n_classes, Chans=19,
+            kernLength1=args.k1, kernLength2=args.k2,
+            F1=args.F1, D=args.D, F2=128,
+            P1=args.P1, P2=args.P2, dropoutRate=args.dropout,
+            num_layers=args.num_layers, dim_feedforward=args.dim_feedforward, ensemble=args.ensemble
+        ).to(device)
     else:
         model = EEGNetClassifier(
             n_classes=n_classes, Chans=14,
@@ -163,24 +218,36 @@ def main():
     weights = (counts.sum() / np.maximum(counts, 1.0))
     weights = torch.tensor(weights, dtype=torch.float, device=device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.95))
 
-    # warmup + cosine decay
+    # Enhanced learning rate scheduling: warmup + cosine annealing with restarts
     def lr_lambda(epoch):
         if epoch < args.warmup:
             return (epoch + 1) / max(1, args.warmup)
-        t = (epoch - args.warmup) / max(1, args.epochs - args.warmup)
-        return 0.5 * (1.0 + math.cos(math.pi * t))
+        # Cosine annealing with warm restarts
+        cycle_length = (args.epochs - args.warmup) // 3  # 3 restarts
+        t = (epoch - args.warmup) % cycle_length
+        return 0.5 * (1.0 + math.cos(math.pi * t / cycle_length))
+    
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lr_lambda)
+    
+    # Additional plateau scheduler for fine-tuning
+    plateau_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode='max', factor=0.5, patience=50, verbose=True, min_lr=1e-7
+    )
 
-    # class-weighted CE with light label smoothing
-    ce = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.05)
+    # Enhanced class-weighted CE with stronger label smoothing
+    ce = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.1)
+    kl = nn.KLDivLoss(reduction='batchmean')
 
     best_va = 0.0
+    patience_counter = 0
+    max_patience = 100
     for epoch in range(1, args.epochs + 1):
         model.train()
         loss_sum = 0.0
         count = 0
+
         for xb, yb in tr_dl:
             xb = xb.to(device).float()
             # per-window, per-channel z-score
@@ -188,25 +255,30 @@ def main():
             xb = xb / (xb.std(dim=2, keepdim=True) + 1e-6)
             yb = yb.to(device).long()
 
-            # ---- start of augmented training step ----
             opt.zero_grad()
 
-            # simple augmentations
-            xb = time_shift(xb, max_shift=8)  # ~62 ms at 128 Hz
-            xb, yb_mixed_target, ysoft = mixup(xb, yb, alpha=0.2, n_classes=n_classes)
+            # Augmentations (toggleable)
+            if not args.no_timeshift:
+                xb = time_shift(xb, max_shift=8)
+            if not args.no_mixup:
+                xb, yb_mixed_target, ysoft = mixup(xb, yb, alpha=0.2, n_classes=n_classes)
+            else:
+                yb_mixed_target, ysoft = yb, None
 
             logits = model(xb)
             if ysoft is None:
                 loss = ce(logits, yb_mixed_target)
             else:
                 lam, y1, y2 = ysoft
-                loss = lam * ce(logits, y1) + (1 - lam) * ce(logits, y2)
+                y1_onehot = F.one_hot(y1, n_classes).float()
+                y2_onehot = F.one_hot(y2, n_classes).float()
+                targets = lam * y1_onehot + (1 - lam) * y2_onehot
+                loss = kl(F.log_softmax(logits, dim=1), targets)
 
             loss.backward()
             opt.step()
-            # ---- end of augmented training step ----
 
-            loss_sum += float(loss.item()) * yb.size(0) 
+            loss_sum += float(loss.item()) * yb.size(0)
             count += int(yb.numel())
 
         tr_loss = loss_sum / max(count, 1)

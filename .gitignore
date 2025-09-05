@@ -12,7 +12,7 @@ env/
 *.pkl
 *.npz
 *.npy
-
+*.mat
 # OS / editor junk
 .DS_Store
 Thumbs.db
