@@ -29,6 +29,7 @@ pay attention to the most important parts of your brain signals!
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.functional as F
 
 class EEGNetTransformerClassifier(nn.Module):
     """
@@ -94,10 +95,7 @@ class EEGNetTransformerClassifier(nn.Module):
 
 
 class EEGNetGRUAttnClassifier(nn.Module):
-    """
-    EEGNet backbone + bidirectional GRU + temporal attention pooling.
-    Combines GRU for temporal modeling and attention for focusing on informative time steps.
-    """
+    """EEGNet backbone + bidirectional GRU + temporal attention pooling with optional LayerNorm."""
     def __init__(
         self,
         n_classes: int = 16,
@@ -112,7 +110,10 @@ class EEGNetGRUAttnClassifier(nn.Module):
         dropoutRate: float = 0.5,
         rnn_hidden: int = 64,
         rnn_layers: int = 1,
-    ):
+        use_layernorm: bool = False,
+    use_proj: bool = False,
+    proj_hidden: int = 0,
+    ) -> None:
         super().__init__()
         self.backbone = EEGcnn(
             Chans=Chans, kernLength1=kernLength1, kernLength2=kernLength2,
@@ -128,14 +129,29 @@ class EEGNetGRUAttnClassifier(nn.Module):
         self.attn = nn.Conv1d(2 * rnn_hidden, 1, kernel_size=1)
         self.dropout = nn.Dropout(dropoutRate)
         self.fc = nn.Linear(2 * rnn_hidden, n_classes)
+        self.layernorm = nn.LayerNorm(2 * rnn_hidden) if use_layernorm else nn.Identity()
+        # Optional residual projection MLP to refine temporal features before attention pooling
+        in_dim = 2 * rnn_hidden
+        if use_proj and proj_hidden > 0:
+            self.proj = nn.Sequential(
+                nn.Linear(in_dim, proj_hidden),
+                nn.GELU(),
+                nn.Dropout(dropoutRate),
+                nn.Linear(proj_hidden, in_dim),
+            )
+        else:
+            self.proj = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # x: [B,C,T]
         feat = self.backbone(x)                 # [B, F2, T_out]
         feat = feat.permute(0, 2, 1)            # [B, T_out, F2]
         out, _ = self.gru(feat)                 # [B, T_out, 2*H]
+        out = self.layernorm(out)
+        if self.proj is not None:
+            out = out + self.proj(out)          # residual refinement
         out = out.permute(0, 2, 1)              # [B, 2*H, T_out]
-        w = self.attn(out)                      # [B, 1, T_out]
-        w = torch.softmax(w, dim=-1)            # attention over time
+        w = self.attn(out)                      # [B,1,T_out]
+        w = torch.softmax(w, dim=-1)
         pooled = (out * w).sum(dim=-1)          # [B, 2*H]
         pooled = self.dropout(pooled)
         return self.fc(pooled)
@@ -145,7 +161,7 @@ class EEGNetGRUAttnClassifier(nn.Module):
 class EEGcnn(nn.Module):
     """
     Mini-EEGNet style backbone.
-    Input:  x [B, C=14, T]
+    Input:  x [B, C, T] where C can be 14 (EEG only) or 19 (EEG + band powers)
     Output: feat [B, F2, T_out]
     """
     def __init__(
@@ -164,14 +180,15 @@ class EEGcnn(nn.Module):
         super().__init__()
         self.F1 = F1
         self.F2 = F2
+        self.eeg_channels = 14  # Always 14 EEG channels for spatial convolution
 
         Drop = nn.Dropout if dropoutType == "Dropout" else nn.Dropout2d
 
-        # Block 1: temporal conv then depthwise spatial conv across channels
+        # Block 1: temporal conv then depthwise spatial conv across EEG channels only
         self.block1 = nn.Sequential(
             nn.Conv2d(1, F1, (1, kernLength1), padding="same", bias=False),
             nn.BatchNorm2d(F1),
-            nn.Conv2d(F1, D * F1, (Chans, 1), groups=F1, bias=False),
+            nn.Conv2d(F1, D * F1, (self.eeg_channels, 1), groups=F1, bias=False),
             nn.BatchNorm2d(D * F1),
             nn.ELU(),
             nn.AvgPool2d((1, P1)),
@@ -187,14 +204,51 @@ class EEGcnn(nn.Module):
             nn.AvgPool2d((1, P2)),
             Drop(p=dropoutRate),
         )
+        
+        # If we have extra features (band powers), process them separately
+        if Chans > self.eeg_channels:
+            extra_features = Chans - self.eeg_channels
+            self.feature_processor = nn.Sequential(
+                nn.Conv1d(extra_features, F2 // 4, kernel_size=1),
+                nn.BatchNorm1d(F2 // 4),
+                nn.ELU(),
+                Drop(p=dropoutRate),
+            )
+            # Combine EEG features with band power features
+            self.feature_combiner = nn.Conv1d(F2 + F2 // 4, F2, kernel_size=1)
+        else:
+            self.feature_processor = None
+            self.feature_combiner = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, Chans, T]
-        x = x.unsqueeze(1)          # [B, 1, Chans, T]
-        x = self.block1(x)          # [B, D*F1, 1, T/P1]
-        x = self.block2(x)          # [B, F2, 1, T/(P1*P2)]
-        x = x.squeeze(2)            # [B, F2, T_out]
-        return x
+        # x: [B, C, T] where C is 14 or 19
+        B, C, T = x.shape
+        
+        # Extract EEG channels (first 14) for spatial convolution
+        eeg_data = x[:, :self.eeg_channels, :]  # [B, 14, T]
+        eeg_data = eeg_data.unsqueeze(1)  # [B, 1, 14, T]
+        
+        # Process EEG data through EEGNet blocks
+        eeg_feat = self.block1(eeg_data)  # [B, D*F1, 1, T/P1]
+        eeg_feat = self.block2(eeg_feat)  # [B, F2, 1, T/(P1*P2)]
+        eeg_feat = eeg_feat.squeeze(2)    # [B, F2, T_out]
+        
+        # If we have extra features (band powers), process and combine them
+        if C > self.eeg_channels and self.feature_processor is not None:
+            extra_data = x[:, self.eeg_channels:, :]  # [B, 5, T]
+            # Downsample extra features to match EEG feature temporal dimension
+            T_out = eeg_feat.shape[2]
+            if extra_data.shape[2] != T_out:
+                extra_data = F.adaptive_avg_pool1d(extra_data, T_out)
+            
+            extra_feat = self.feature_processor(extra_data)  # [B, F2//4, T_out]
+            
+            # Combine EEG and extra features
+            combined_feat = torch.cat([eeg_feat, extra_feat], dim=1)  # [B, F2 + F2//4, T_out]
+            final_feat = self.feature_combiner(combined_feat)  # [B, F2, T_out]
+            return final_feat
+        else:
+            return eeg_feat
 
 
 class EEGNetClassifier(nn.Module):
@@ -229,10 +283,7 @@ class EEGNetClassifier(nn.Module):
 
 
 class EEGNetGRUClassifier(nn.Module):
-    """
-    EEGNet backbone + bidirectional GRU over time.
-    Uses GRU to aggregate temporal features from EEGNet.
-    """
+    """EEGNet backbone + bidirectional GRU over time with optional LayerNorm."""
     def __init__(
         self,
         n_classes: int = 16,
@@ -247,7 +298,8 @@ class EEGNetGRUClassifier(nn.Module):
         dropoutRate: float = 0.5,
         rnn_hidden: int = 64,
         rnn_layers: int = 1,
-    ):
+        use_layernorm: bool = False,
+    ) -> None:
         super().__init__()
         self.backbone = EEGcnn(
             Chans=Chans, kernLength1=kernLength1, kernLength2=kernLength2,
@@ -262,12 +314,14 @@ class EEGNetGRUClassifier(nn.Module):
         )
         self.dropout = nn.Dropout(dropoutRate)
         self.fc = nn.Linear(2 * rnn_hidden, n_classes)
+        self.layernorm = nn.LayerNorm(2 * rnn_hidden) if use_layernorm else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # x: [B,C,T]
         feat = self.backbone(x)                 # [B, F2, T_out]
         feat = feat.permute(0, 2, 1)            # [B, T_out, F2]
         out, _ = self.gru(feat)                 # [B, T_out, 2*H]
-        out = out.mean(dim=1)                   # mean over time is more stable
+        out = self.layernorm(out)
+        out = out.mean(dim=1)                   # [B, 2*H]
         out = self.dropout(out)
         return self.fc(out)
 
